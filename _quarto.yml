@@ -7,6 +7,11 @@ website:
   site-url: https://iSmailTG.github.io/inference-engineering
   title: "inference-engineering"
   navbar:
+    left:
+      - text: "Blog"
+        href: index.qmd
+      - text: "Inference Grind"
+        href: inference-grind.qmd
     right:
       - about.qmd
       - icon: github

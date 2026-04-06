@@ -1,7 +1,9 @@
 ---
 title: "inference-engineering"
 listing:
-  contents: posts
+  contents: 
+  	- posts
+  	- posts/weekly
   feed: true
   sort: "date desc"
   type: default
