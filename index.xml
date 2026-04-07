@@ -6,53 +6,611 @@
       version="2.0">
 <channel>
 <title>inference-engineering</title>
-<link>https://your-website-url.example.com/</link>
-<atom:link href="https://your-website-url.example.com/index.xml" rel="self" type="application/rss+xml"/>
+<link>https://iSmailTG.github.io/inference-engineering/</link>
+<atom:link href="https://iSmailTG.github.io/inference-engineering/index.xml" rel="self" type="application/rss+xml"/>
 <description>A blog built with Quarto</description>
 <generator>quarto-1.8.25</generator>
-<lastBuildDate>Sun, 05 Apr 2026 23:00:00 GMT</lastBuildDate>
+<lastBuildDate>Mon, 06 Apr 2026 23:00:00 GMT</lastBuildDate>
 <item>
-  <title>Post With Code</title>
-  <dc:creator>Harlow Malloc</dc:creator>
-  <link>https://your-website-url.example.com/posts/post-with-code/</link>
+  <title>Week 1: CUDA Kernels, ctypes, and the Memory Hierarchy</title>
+  <dc:creator>Ismail TG</dc:creator>
+  <link>https://iSmailTG.github.io/inference-engineering/posts/weekly/Week_1/week1_blog.html</link>
   <description><![CDATA[ 
 
 
 
 
 
-<p>This is a post with executable code.</p>
+<p>I spent seven days building/learning: - a matrix multiplication kernel in raw CUDA. - bridging it to Python through two different interfaces. - discovering exactly why my code runs 20× slower than PyTorch.</p>
+<p>This post is what I learned along the way. The goal wasn’t to beat cuBLAS—it was to understand why I couldn’t. Every kernel I write in the coming weeks will rest on the mental model I built this week.</p>
+<section id="the-gpu-mental-model" class="level2">
+<h2 class="anchored" data-anchor-id="the-gpu-mental-model">The GPU Mental Model</h2>
+<p>You cannot write CUDA by translating Python loops into C. A GPU is not a faster CPU. It’s a <em>different</em> computer entirely.</p>
+<p>When we launch a CUDA kernel, the GPU executes the function thousands of times <strong>simultaneously</strong>. Each execution is a <strong>thread</strong>. Threads are grouped into a <strong>block</strong>; blocks form a <strong>grid</strong>. The hierarchy looks like this:</p>
+<pre><code>Grid
+├── Block(0,0) ── Thread(0,0) Thread(0,1) Thread(1,0) ...
+├── Block(0,1) ── Thread(0,0) Thread(0,1) ...
+├── Block(1,0) ── ...
+└── ...</code></pre>
+<p>Every thread knows exactly two things: - <code>blockIdx</code> — which block in the grid am I in? - <code>threadIdx</code> — which thread within my block am I?</p>
+<p>From these, each thread computes its unique coordinates in the output matrix:</p>
+<pre class="cuda"><code>int row = blockIdx.y * blockDim.y + threadIdx.y;
+int col = blockIdx.x * blockDim.x + threadIdx.x;</code></pre>
+<p>As a kernel writer: use <code>row</code> and <code>col</code> to do <strong>exactly one piece of work</strong>. No thread collaborates with another by default. They run in parallel isolation.</p>
+<section id="the-memory-hierarchy-why-naive-kernels-are-slow" class="level3">
+<h3 class="anchored" data-anchor-id="the-memory-hierarchy-why-naive-kernels-are-slow">The Memory Hierarchy: Why Naive Kernels Are Slow</h3>
+<table class="caption-top table">
+<thead>
+<tr class="header">
+<th>Memory</th>
+<th>Latency</th>
+<th>Size</th>
+<th>Scope</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Registers</td>
+<td>~1 cycle</td>
+<td>Very limited (per thread)</td>
+<td>One thread</td>
+</tr>
+<tr class="even">
+<td>Shared memory</td>
+<td>~4 cycles</td>
+<td>48KB per block</td>
+<td>Threads in same block</td>
+</tr>
+<tr class="odd">
+<td>Global memory</td>
+<td>~400 cycles</td>
+<td>16GB+</td>
+<td>All threads</td>
+</tr>
+</tbody>
+</table>
+<p>My kernel reads from global memory repeatedly. cuBLAS reads from shared memory. That 100× latency difference explains nearly everything about the performance gap.</p>
+</section>
+</section>
+<section id="the-kernel-line-by-line" class="level2">
+<h2 class="anchored" data-anchor-id="the-kernel-line-by-line">The Kernel — Line by Line</h2>
+<p>Here’s the complete naive matrix multiplication kernel I wrote, compiled, and debugged:</p>
+<pre class="cuda"><code>#include &lt;cuda_runtime.h&gt;
+
+__global__ void matmul_kernel(float* A, float* B, float* C,
+                              int M, int N, int K) {
+    // Each thread computes one element of C
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+
+    // Guard: skip threads outside matrix bounds
+    if (row &lt; M &amp;&amp; col &lt; N) {
+        float sum = 0.0f;
+        for (int i = 0; i &lt; K; i++) {
+            sum += A[row * K + i] * B[i * N + col];
+        }
+        C[row * N + col] = sum;
+    }
+}
+
+// C interface for Python ctypes
+extern "C" {
+    void matmul_cuda(float* A, float* B, float* C,
+                     int M, int N, int K) {
+        dim3 blockDim(16, 16);           // 256 threads per block
+        dim3 gridDim((N + 15) / 16,      // Ceiling division for columns
+                     (M + 15) / 16);     // Ceiling division for rows
+        
+        matmul_kernel&lt;&lt;&lt;gridDim, blockDim&gt;&gt;&gt;(A, B, C, M, N, K);
+        cudaDeviceSynchronize();         // Wait for GPU to finish
+    }
+}</code></pre>
+<p>Let me explain what took me hours to truly internalize:</p>
+<p><strong><code>__global__</code></strong> : This function runs on the GPU but is called from the CPU. Every thread enters here simultaneously.</p>
+<p><strong>The coordinate calculation</strong> : This is the heart of CUDA. <code>blockIdx.y * blockDim.y + threadIdx.y</code> maps the 2D grid of threads onto the 2D matrix of outputs. I spent an hour drawing 4×4 grids on paper until I could trace any <code>(blockIdx, threadIdx)</code> pair to its output element without thinking.</p>
+<p><strong>The guard condition</strong> : Matrix dimensions rarely divide evenly by 16. If N=33, I need 3 blocks (48 threads) to cover 33 columns. The last 15 threads would compute garbage or worse, write to invalid memory. The guard makes them exit early.</p>
+<p><strong>Row-major indexing</strong> : CUDA has no 2D arrays. <code>A[row * K + i]</code> treats a flat 1D buffer as a matrix. For a 3×3 matrix, element [1][2] lives at index <code>1*3 + 2 = 5</code>. I verified this with pen and paper until it felt automatic.</p>
+<p><strong>Ceiling division</strong> — <code>(N + 15) / 16</code> instead of <code>N / 16</code>. Integer division truncates; I need to round up to cover all columns. The <code>+15</code> ensures we get the next integer when there’s any remainder.</p>
+<p><strong><code>extern "C"</code></strong> — C++ mangles function names (encoding types into the symbol). <code>matmul_cuda</code> becomes something like <code>_Z12matmul_cudaPfS_S_iii</code>. ctypes looks up functions by exact string match. <code>extern "C"</code> disables name mangling so Python can find the symbol.</p>
+<p><strong><code>cudaDeviceSynchronize()</code></strong> — The CPU launches the kernel and returns immediately. Without synchronization, the CPU might read <code>C</code> before the GPU finishes writing it. I learned this the hard way: tests passed randomly, then failed randomly, until I added this line.</p>
+<p>Compile with:</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb4" style="background: #f1f3f5;"><pre class="sourceCode bash code-with-copy"><code class="sourceCode bash"><span id="cb4-1"><span class="ex" style="color: null;
+background-color: null;
+font-style: inherit;">nvcc</span> <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">-shared</span> <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">-o</span> kernels/matmul.so kernels/matmul.cu <span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">\</span></span>
+<span id="cb4-2">     <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">-Xcompiler</span> <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">-fPIC</span> <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">-O2</span></span></code></pre></div></div>
+</section>
+<section id="two-bridges-from-python-to-cuda" class="level2">
+<h2 class="anchored" data-anchor-id="two-bridges-from-python-to-cuda">Two Bridges from Python to CUDA</h2>
+<p>Getting the kernel to run was only half the battle. I needed to call it from Python. I built two bridges: the manual way and the production way.</p>
+<section id="bridge-1-ctypes-for-educational-purposes" class="level3">
+<h3 class="anchored" data-anchor-id="bridge-1-ctypes-for-educational-purposes">Bridge 1: ctypes (For Educational Purposes)</h3>
+<p>ctypes is Python’s built-in foreign function interface. It lets you load compiled C libraries and call them directly. Nothing is hidden, which means nothing is automatic.</p>
+<div id="a6ec15c4" class="cell">
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb5" style="background: #f1f3f5;"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb5-1"><span class="im" style="color: #00769E;
+background-color: null;
+font-style: inherit;">import</span> ctypes</span>
+<span id="cb5-2"><span class="im" style="color: #00769E;
+background-color: null;
+font-style: inherit;">import</span> torch</span>
+<span id="cb5-3"></span>
+<span id="cb5-4"><span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;"># Load the compiled shared library</span></span>
+<span id="cb5-5">matmul_lib <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span> ctypes.CDLL(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"./kernels/matmul.so"</span>)</span>
+<span id="cb5-6"></span>
+<span id="cb5-7"><span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;"># CRITICAL: Declare argument types. Python has no idea what the C </span></span>
+<span id="cb5-8"><span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;"># function expects. Without this, it passes garbage.</span></span>
+<span id="cb5-9">matmul_lib.matmul_cuda.argtypes <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span> [</span>
+<span id="cb5-10">    ctypes.POINTER(ctypes.c_float),  <span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;"># float* A</span></span>
+<span id="cb5-11">    ctypes.POINTER(ctypes.c_float),  <span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;"># float* B</span></span>
+<span id="cb5-12">    ctypes.POINTER(ctypes.c_float),  <span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;"># float* C</span></span>
+<span id="cb5-13">    ctypes.c_int, ctypes.c_int, ctypes.c_int  <span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;"># M, N, K</span></span>
+<span id="cb5-14">]</span>
+<span id="cb5-15">matmul_lib.matmul_cuda.restype <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span> <span class="va" style="color: #111111;
+background-color: null;
+font-style: inherit;">None</span>  <span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;"># Returns void</span></span>
+<span id="cb5-16"></span>
+<span id="cb5-17"><span class="kw" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">def</span> matmul_cuda(A: torch.Tensor, B: torch.Tensor) <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">-&gt;</span> torch.Tensor:</span>
+<span id="cb5-18">    <span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;"># Defensive checks: fail loudly, not silently</span></span>
+<span id="cb5-19">    <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">assert</span> A.is_cuda <span class="kw" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">and</span> B.is_cuda, <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Tensors must be on GPU"</span></span>
+<span id="cb5-20">    <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">assert</span> A.dtype <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">==</span> torch.float32, <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Only float32 supported"</span></span>
+<span id="cb5-21">    <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">assert</span> A.is_contiguous() <span class="kw" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">and</span> B.is_contiguous(), <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Must be contiguous"</span></span>
+<span id="cb5-22">    </span>
+<span id="cb5-23">    M, K <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span> A.shape</span>
+<span id="cb5-24">    K2, N <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span> B.shape</span>
+<span id="cb5-25">    <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">assert</span> K <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">==</span> K2, <span class="ss" style="color: #20794D;
+background-color: null;
+font-style: inherit;">f"Shape mismatch: </span><span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">{</span>M<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">}</span><span class="ss" style="color: #20794D;
+background-color: null;
+font-style: inherit;">×</span><span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">{</span>K<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">}</span><span class="ss" style="color: #20794D;
+background-color: null;
+font-style: inherit;"> @ </span><span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">{</span>K2<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">}</span><span class="ss" style="color: #20794D;
+background-color: null;
+font-style: inherit;">×</span><span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">{</span>N<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">}</span><span class="ss" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"</span></span>
+<span id="cb5-26">    </span>
+<span id="cb5-27">    C <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span> torch.zeros(M, N, device<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span><span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"cuda"</span>, dtype<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span>torch.float32)</span>
+<span id="cb5-28">    </span>
+<span id="cb5-29">    <span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;"># Get raw GPU memory addresses and cast to C pointers</span></span>
+<span id="cb5-30">    A_ptr <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span> ctypes.cast(A.data_ptr(), ctypes.POINTER(ctypes.c_float))</span>
+<span id="cb5-31">    B_ptr <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span> ctypes.cast(B.data_ptr(), ctypes.POINTER(ctypes.c_float))</span>
+<span id="cb5-32">    C_ptr <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span> ctypes.cast(C.data_ptr(), ctypes.POINTER(ctypes.c_float))</span>
+<span id="cb5-33">    </span>
+<span id="cb5-34">    matmul_lib.matmul_cuda(A_ptr, B_ptr, C_ptr, M, N, K)</span>
+<span id="cb5-35">    <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">return</span> C</span></code></pre></div></div>
+</div>
+<p>Three things I had to handle manually:</p>
+<ol type="1">
+<li><p><strong><code>argtypes</code> declaration</strong> — ctypes defaults to passing integers. Without explicit types, my float pointers were interpreted as integers. The function received garbage addresses and either segfaulted or returned nonsense.</p></li>
+<li><p><strong><code>data_ptr()</code> and casting</strong> — <code>A.data_ptr()</code> returns the GPU memory address as a Python integer. ctypes needs a typed pointer, so I cast it. This is the exact boundary between Python objects and raw memory.</p></li>
+<li><p><strong>The <code>is_contiguous()</code> trap</strong> — PyTorch tensors can be non-contiguous (e.g., after <code>.transpose()</code>). They share memory but use different indexing. My kernel assumes row-major sequential layout. A non-contiguous tensor would pass all shape checks but compute wrong results <strong>silently</strong>. I spent an hour debugging a “correct” test before realizing the tensor was transposed.</p></li>
+</ol>
+</section>
+<section id="bridge-2-cpp_extension-the-production-path" class="level3">
+<h3 class="anchored" data-anchor-id="bridge-2-cpp_extension-the-production-path">Bridge 2: cpp_extension (The Production Path)</h3>
+<p>Once I understood what ctypes was doing manually, I switched to PyTorch’s <code>cpp_extension</code>, which automates everything I just struggled through.</p>
+<pre class="cuda"><code>// kernels/matmul_ext.cu
+#include &lt;torch/extension.h&gt;
+
+__global__ void matmul_kernel(float* A, float* B, float* C,
+                              int M, int N, int K) {
+    // ... same kernel as before ...
+}
+
+torch::Tensor matmul_cuda_ext(torch::Tensor A, torch::Tensor B) {
+    TORCH_CHECK(A.is_cuda() &amp;&amp; B.is_cuda(), "Tensors must be on GPU");
+    TORCH_CHECK(A.dtype() == torch::kFloat32, "Support Float32 only"
+    TORCH_CHECK(A.is_contiguous() &amp;&amp; B.is_contiguous(), "Must be contiguous");
+    
+    int M = A.size(0), K = A.size(1), N = B.size(1);
+    auto C = torch::zeros({M, N}, A.options());
+    
+    dim3 blockDim(16, 16);
+    dim3 gridDim((N + 15) / 16, (M + 15) / 16);
+    
+    matmul_kernel&lt;&lt;&lt;gridDim, blockDim&gt;&gt;&gt;(
+        A.data_ptr&lt;float&gt;(),
+        B.data_ptr&lt;float&gt;(),
+        C.data_ptr&lt;float&gt;(),
+        M, N, K
+    );
+    cudaDeviceSynchronize();
+    return C;
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("matmul", &amp;matmul_cuda_ext, "Matrix multiply (CUDA)");
+}</code></pre>
+<div id="b3b7da78" class="cell">
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb7" style="background: #f1f3f5;"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb7-1"><span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;"># src/kernel_ext.py</span></span>
+<span id="cb7-2"><span class="im" style="color: #00769E;
+background-color: null;
+font-style: inherit;">from</span> torch.utils.cpp_extension <span class="im" style="color: #00769E;
+background-color: null;
+font-style: inherit;">import</span> load</span>
+<span id="cb7-3"></span>
+<span id="cb7-4">matmul_ext <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span> load(</span>
+<span id="cb7-5">    name<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span><span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"matmul_ext"</span>,</span>
+<span id="cb7-6">    sources<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span>[<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"kernels/matmul_ext.cu"</span>],</span>
+<span id="cb7-7">    verbose<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span><span class="va" style="color: #111111;
+background-color: null;
+font-style: inherit;">True</span>  <span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;"># Shows compilation output on first run</span></span>
+<span id="cb7-8">)</span>
+<span id="cb7-9"></span>
+<span id="cb7-10"><span class="kw" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">def</span> matmul_cuda_v2(A, B):</span>
+<span id="cb7-11">    <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">return</span> matmul_ext.matmul(A, B)</span></code></pre></div></div>
+</div>
+<p>No manual <code>nvcc</code>. No <code>argtypes</code>. No <code>ctypes.cast()</code>. PyTorch compiles on first import, caches the result, and handles type conversion automatically. <code>TORCH_CHECK</code> provides clean error messages integrated with PyTorch’s exception system.</p>
+</section>
+<section id="why-i-needed-both" class="level3">
+<h3 class="anchored" data-anchor-id="why-i-needed-both">Why I Needed Both</h3>
+<table class="caption-top table">
+<colgroup>
+<col style="width: 25%">
+<col style="width: 25%">
+<col style="width: 48%">
+</colgroup>
+<thead>
+<tr class="header">
+<th>Aspect</th>
+<th>ctypes</th>
+<th>cpp_extension</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Compilation</td>
+<td>Manual <code>nvcc</code> command</td>
+<td>Automatic on first import</td>
+</tr>
+<tr class="even">
+<td>Type safety</td>
+<td>Manual <code>argtypes</code> declaration</td>
+<td>C++ type system</td>
+</tr>
+<tr class="odd">
+<td>Pointer handling</td>
+<td><code>data_ptr()</code> + <code>ctypes.cast()</code></td>
+<td><code>tensor.data_ptr&lt;float&gt;()</code></td>
+</tr>
+<tr class="even">
+<td>Error messages</td>
+<td>Python <code>assert</code></td>
+<td><code>TORCH_CHECK</code> macros</td>
+</tr>
+<tr class="odd">
+<td>Used in production</td>
+<td>No</td>
+<td>Yes (vLLM, FlashAttention, etc.)</td>
+</tr>
+</tbody>
+</table>
+<p>I needed ctypes to understand what cpp_extension hides. Now I use cpp_extension, but I know exactly what it’s doing underneath.</p>
+</section>
+</section>
+<section id="benchmarking-measuring-performance" class="level2">
+<h2 class="anchored" data-anchor-id="benchmarking-measuring-performance">Benchmarking: Measuring Performance</h2>
+<p>GPU timing is subtle. <code>time.time()</code> measures <strong>CPU</strong> time—the moment the kernel was launched, not when it finished. GPU operations are asynchronous.</p>
+<p>The correct method uses CUDA Events, which are timestamps recorded on the GPU itself:</p>
+<div id="a7ffe881" class="cell">
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb8" style="background: #f1f3f5;"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb8-1"><span class="kw" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">def</span> benchmark(fn, A, B, n<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span><span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">100</span>, warmup<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span><span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">10</span>):</span>
+<span id="cb8-2">    <span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;"># Warmup: first run triggers JIT compilation</span></span>
+<span id="cb8-3">    <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">for</span> _ <span class="kw" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">in</span> <span class="bu" style="color: null;
+background-color: null;
+font-style: inherit;">range</span>(warmup):</span>
+<span id="cb8-4">        fn(A, B)</span>
+<span id="cb8-5">    torch.cuda.synchronize()</span>
+<span id="cb8-6">    </span>
+<span id="cb8-7">    <span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;"># Actual timing with CUDA Events</span></span>
+<span id="cb8-8">    start <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span> torch.cuda.Event(enable_timing<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span><span class="va" style="color: #111111;
+background-color: null;
+font-style: inherit;">True</span>)</span>
+<span id="cb8-9">    end <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span> torch.cuda.Event(enable_timing<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span><span class="va" style="color: #111111;
+background-color: null;
+font-style: inherit;">True</span>)</span>
+<span id="cb8-10">    </span>
+<span id="cb8-11">    start.record()</span>
+<span id="cb8-12">    <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">for</span> _ <span class="kw" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">in</span> <span class="bu" style="color: null;
+background-color: null;
+font-style: inherit;">range</span>(n):</span>
+<span id="cb8-13">        fn(A, B)</span>
+<span id="cb8-14">    end.record()</span>
+<span id="cb8-15">    torch.cuda.synchronize()</span>
+<span id="cb8-16">    </span>
+<span id="cb8-17">    <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">return</span> start.elapsed_time(end) <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">/</span> n  <span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;"># milliseconds</span></span></code></pre></div></div>
+</div>
+<p>Results on a T4 GPU:</p>
+<table class="caption-top table">
+<thead>
+<tr class="header">
+<th>Matrix Size</th>
+<th>ctypes (ms)</th>
+<th>cpp_ext (ms)</th>
+<th>Pytorch</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>128×128×128</td>
+<td>0.053 ms</td>
+<td>0.053 ms</td>
+<td>0.015 ms</td>
+</tr>
+<tr class="even">
+<td>512×512×512</td>
+<td>0.902 ms</td>
+<td>0.494 ms</td>
+<td>0.055 ms</td>
+</tr>
+<tr class="odd">
+<td>1024×1024×1024</td>
+<td>4.382 ms</td>
+<td>4.384 ms</td>
+<td>0.646 ms</td>
+</tr>
+</tbody>
+</table>
+<p>To interpret these, compute <strong>GFLOP/s</strong> (billions of floating-point operations per second):</p>
+<p><img src="https://latex.codecogs.com/png.latex?%5Ctext%7BGFLOP/s%7D%20=%20%5Cfrac%7B2%20%5Ctimes%20M%20%5Ctimes%20K%20%5Ctimes%20N%7D%7B%5Ctext%7Btime%20(s)%7D%20%5Ctimes%2010%5E9%7D"></p>
+<p>A T4 has a theoretical peak of ~65 TFLOP/s. PyTorch typically achieves 40–60% of peak on large matrices. My kernel achieves a tiny fraction. The gap is 10–50×, and now I know exactly why.</p>
+</section>
+<section id="why-my-kernel-is-slow" class="level2">
+<h2 class="anchored" data-anchor-id="why-my-kernel-is-slow">Why My Kernel Is Slow</h2>
+<p>My naive implementation reads from <strong>global memory</strong> on every iteration of the inner loop. Global memory latency is ~400 cycles. For a 1024×1024 matmul, each output element requires 2048 global memory reads (1024 from A, 1024 from B). That’s over 800,000 cycles of memory latency per element.</p>
+<p>cuBLAS uses <strong>shared memory tiling</strong>:</p>
+<ol type="1">
+<li>Load a 16×16 (or 32×32) tile of A and B from global memory into shared memory (~4 cycles)</li>
+<li>Compute partial results for all elements in the tile using fast shared memory</li>
+<li>Load the next tile, accumulate, repeat</li>
+</ol>
+<p>This reduces global memory accesses by the tile size factor (16–32×). That’s where the performance gap comes from.</p>
+<p>I didn’t implement tiling this week. That was intentional. The goal was to understand <em>why</em> the gap exists before trying to close it. Next week, I’ll add shared memory tiling and watch the numbers move.</p>
+</section>
+<section id="where-this-fits-matmul-in-llama" class="level2">
+<h2 class="anchored" data-anchor-id="where-this-fits-matmul-in-llama">Where This Fits: Matmul in Llama</h2>
+<p>Every matmul I wrote this week corresponds to a real operation in Llama’s transformer block:</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb9" style="background: #f1f3f5;"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb9-1"><span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;"># In every attention layer:</span></span>
+<span id="cb9-2">Q <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span> x <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">@</span> W_q          <span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;"># (seq_len, dim) @ (dim, n_heads * head_dim)</span></span>
+<span id="cb9-3">K <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span> x <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">@</span> W_k          <span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;"># Same for keys</span></span>
+<span id="cb9-4">V <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span> x <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">@</span> W_v          <span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;"># Same for values</span></span>
+<span id="cb9-5">scores <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span> Q <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">@</span> K.T     <span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;"># (seq_len, head_dim) @ (head_dim, seq_len) = O(seq_len²)</span></span>
+<span id="cb9-6">output <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span> scores <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">@</span> V  <span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;"># (seq_len, seq_len) @ (seq_len, head_dim)</span></span></code></pre></div></div>
+<p>The <code>Q @ K.T</code> operation is the infamous quadratic scaling bottleneck. Double the context length, quadruple the compute. This is exactly what FlashAttention, paged attention, and speculative decoding optimize.</p>
+<p>The kernel I wrote this week is the primitive that makes all of those optimizations possible. I needed to feel its limitations in my bones before I can transcend them.</p>
+</section>
+<section id="what-i-learned" class="level2">
+<h2 class="anchored" data-anchor-id="what-i-learned">What I Learned</h2>
+<ol type="1">
+<li><p><strong>CUDA is not parallel Python</strong>. It’s a data-parallel execution model where you map threads to data, not instructions to execution order.</p></li>
+<li><p><strong>Memory hierarchy dominates performance</strong>. Algorithmic complexity (O(n³) for matmul) is necessary but not sufficient. Memory access patterns determine actual speed.</p></li>
+<li><p><strong>The boundary between Python and C is explicit</strong>. <code>data_ptr()</code> is the gateway. Everything else is convention and error checking.</p></li>
+<li><p><strong>Correctness comes from invariants, not hope</strong>. The <code>is_contiguous()</code> check, the guard condition, the synchronization—these aren’t optional niceties. They’re load-bearing structural elements.</p></li>
+<li><p><strong>Slow and understood beats fast and mysterious</strong>. My kernel is 20× slower than cuBLAS, but I can explain every cycle of that gap. Next week, I’ll start closing it.</p></li>
+</ol>
+</section>
+<section id="whats-next" class="level2">
+<h2 class="anchored" data-anchor-id="whats-next">What’s Next</h2>
+<p><strong>Week 2</strong>: Shared memory tiling. I’ll rewrite the kernel to load tiles into <code>__shared__</code> memory, synchronize threads with <code>__syncthreads()</code>, and watch the benchmark numbers improve. Then I’ll plug the kernel into an actual attention layer.</p>
+<p>The foundation is built. The fun starts now.</p>
+<hr>
+<p><strong>Repository</strong>: <a href="https://github.com/iSmailTG/Cuda/tree/main/mini-inference-engine">mini-inference-engine</a><br>
+<strong>Full code</strong>: All kernels, bridges, tests, and benchmarks are in the repo.</p>
 
 
+</section>
 
  ]]></description>
-  <category>news</category>
-  <category>code</category>
-  <category>analysis</category>
-  <guid>https://your-website-url.example.com/posts/post-with-code/</guid>
-  <pubDate>Sun, 05 Apr 2026 23:00:00 GMT</pubDate>
-  <media:content url="https://your-website-url.example.com/posts/post-with-code/image.jpg" medium="image" type="image/jpeg"/>
-</item>
-<item>
-  <title>Welcome To My Blog</title>
-  <dc:creator>Tristan O&#39;Malley</dc:creator>
-  <link>https://your-website-url.example.com/posts/welcome/</link>
-  <description><![CDATA[ 
-
-
-
-
-
-<p>This is the first post in a Quarto blog. Welcome!</p>
-<p><img src="https://your-website-url.example.com/posts/welcome/thumbnail.jpg" class="img-fluid"></p>
-<p>Since this post doesn’t specify an explicit <code>image</code>, the first image in the post will be used in the listing page of posts.</p>
-
-
-
- ]]></description>
-  <category>news</category>
-  <guid>https://your-website-url.example.com/posts/welcome/</guid>
-  <pubDate>Thu, 02 Apr 2026 23:00:00 GMT</pubDate>
+  <category>CUDA</category>
+  <category>Pytorch</category>
+  <category>Inference</category>
+  <guid>https://iSmailTG.github.io/inference-engineering/posts/weekly/Week_1/week1_blog.html</guid>
+  <pubDate>Mon, 06 Apr 2026 23:00:00 GMT</pubDate>
+  <media:content url="https://iSmailTG.github.io/inference-engineering/posts/weekly/Week_1/fweek1_blog.ipynb" medium="image"/>
 </item>
 </channel>
 </rss>
