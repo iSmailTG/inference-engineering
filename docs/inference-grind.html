@@ -80,9 +80,9 @@ ul.task-list li input[type="checkbox"] {
     }
 
     const options = {
-      valueNames: [{ data: ['index'] },{ data: ['categories'] },{ data: ['listing-date-sort'] },{ data: ['listing-file-modified-sort'] }],
+      valueNames: ['listing-date','listing-title','listing-author','listing-image','listing-description',{ data: ['index'] },{ data: ['categories'] },{ data: ['listing-date-sort'] },{ data: ['listing-file-modified-sort'] }],
       
-      searchColumns: [],
+      searchColumns: ["listing-date","listing-title","listing-author","listing-image","listing-description"],
     };
 
     window['quarto-listings'] = window['quarto-listings'] || {};
@@ -216,7 +216,31 @@ window.Quarto = {
 
 <div class="quarto-listing quarto-listing-container-default" id="listing-listing">
 <div class="list quarto-listing-default">
+<div class="quarto-post image-right" data-index="0" data-categories="Q1VEQSUyQ1B5dG9yY2glMkNJbmZlcmVuY2U=" data-listing-date-sort="1775516400000" data-listing-file-modified-sort="1775560456438" data-listing-date-modified-sort="NaN" data-listing-reading-time-sort="11" data-listing-word-count-sort="2093">
+<div class="thumbnail"><a href="./posts/weekly/Week_1/week1_blog.html" class="no-external">
 
+<img loading="lazy" src="./posts/weekly/Week_1/fweek1_blog.ipynb" class="thumbnail-image">
+
+</a></div>
+<div class="body">
+<h3 class="no-anchor listing-title">
+<a href="./posts/weekly/Week_1/week1_blog.html" class="no-external">Week 1: CUDA Kernels, ctypes, and the Memory Hierarchy</a>
+</h3>
+<div class="delink listing-description"><a href="./posts/weekly/Week_1/week1_blog.html" class="no-external">
+I spent seven days building/learning: - a matrix multiplication kernel in raw CUDA. - bridging it to Python through two different interfaces. - discovering exactly why my…
+</a></div>
+</div>
+<div class="metadata">
+<a href="./posts/weekly/Week_1/week1_blog.html" class="no-external">
+<div class="listing-date">
+Apr 7, 2026
+</div>
+<div class="listing-author">
+Ismail TG
+</div>
+</a>
+</div>
+</div>
 </div>
 <div class="listing-no-matching d-none">No matching items</div>
 </div></main> <!-- /main -->
