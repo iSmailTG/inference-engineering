@@ -77,18 +77,18 @@
     "text": "What’s Next\nWeek 2: Shared memory tiling. I’ll rewrite the kernel to load tiles into __shared__ memory, synchronize threads with __syncthreads(), and watch the benchmark numbers improve. Then I’ll plug the kernel into an actual attention layer.\nThe foundation is built. The fun starts now.\n\nRepository: mini-inference-engine\nFull code: All kernels, bridges, tests, and benchmarks are in the repo."
   },
   {
-    "objectID": "inference-grind.html",
-    "href": "inference-grind.html",
-    "title": "Inference Grind",
-    "section": "",
-    "text": "Week 1: CUDA Kernels, ctypes, and the Memory Hierarchy\n\n\n\n\n\n\n\n\nApr 7, 2026\n\n\nIsmail TG\n\n\n\n\n\nNo matching items"
-  },
-  {
     "objectID": "index.html",
     "href": "index.html",
     "title": "inference-engineering",
     "section": "",
     "text": "Week 1: CUDA Kernels, ctypes, and the Memory Hierarchy\n\n\n\nCUDA\n\nPytorch\n\nInference\n\n\n\n\n\n\n\n\n\nApr 7, 2026\n\n\nIsmail TG\n\n\n\n\n\nNo matching items"
+  },
+  {
+    "objectID": "inference-grind.html",
+    "href": "inference-grind.html",
+    "title": "Inference Grind",
+    "section": "",
+    "text": "Week 1: CUDA Kernels, ctypes, and the Memory Hierarchy\n\n\n\n\n\n\n\n\nApr 7, 2026\n\n\nIsmail TG\n\n\n\n\n\nNo matching items"
   },
   {
     "objectID": "posts/post-with-code/index.html",
